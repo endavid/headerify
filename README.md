@@ -7,6 +7,12 @@ TexturePackerExporters
 =======================
 * Install this as an exporter to TexturePacker to create header file definitions for your textures: http://www.codeandweb.com/texturepacker/documentation#customization
 
+bin/headerifyCollada.rb
+========================
+* Converts the geometry inside .dae Collada files to C syntax.
+* I use it to convert files exported from Blender to data directly usabe in OpenGL. 
+* When the up axis is set to Z (Blender exporter), axis are converted to OpenGL (y'=z, z'=-y)   
+
 bin/headerifyFont.rb
 =====================
 * Converts .FNT bitmap fonts definitions to C syntax.
