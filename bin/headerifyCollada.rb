@@ -241,6 +241,8 @@ def createDebugUVImage(width, height, filename)
 		j = height - (height * uv[1]).round.to_i
 		if i >= width || j >= height
 			puts "Out of bounds: #{i}, #{j}"
+			i = i % width
+			j = j % height
 		end
 		if png[i, j] != 0
 			# duplicate vertex
