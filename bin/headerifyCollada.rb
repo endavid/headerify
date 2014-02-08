@@ -124,13 +124,7 @@ def findUVEquivalences(uvArray, textureWidth, textureHeight)
 		end
 		index = index + 1
 	end
-	if redundantCount > 0
-		puts "Found #{redundantCount} redundant UV entries, out of #{uvArray.size}."
-		if (redundantCount.to_f/uvArray.size.to_f)>= 0.25
-			puts "You should consider reducing the number of UV loops in your model."
-		end
-	end
-	return equivalences
+	return {:equivalences => equivalences, :redundant => redundantCount}
 end
 
 def findPolygonEquivalences(polys, uvEquivalences)
@@ -151,10 +145,7 @@ def findPolygonEquivalences(polys, uvEquivalences)
 		end
 		index = index + 1		
 	end
-	if redundantCount > 0
-		puts "Found #{redundantCount} redundant vertices."
-	end
-	return equivalences
+	return {:equivalences => equivalences, :redundant => redundantCount}
 end
 
 # a b c d e... -> {a, b} {c, d}  ...
@@ -191,7 +182,7 @@ end
 ########################################################
 # Create header
 ########################################################
-def createHeader()
+def createHeader(equivalences)
 	begin
 		file = File.open($outputfile, "w")
 		file.puts "/**\n * @file #{$outputfile}"
@@ -200,11 +191,21 @@ def createHeader()
 		file.puts "\#define #{$h_guard}\n\n"
 		# vertices
 		file.puts "static const vertexDataTextured #{$variableVertices}[] = {"
+		index = 0
+		numVerts = 0
+		indexRef = Array.new
 		$polygons.each do |p|
-			v = $vertices[p[0]]
-			n = $normals[p[1]]
-			t = $texcoord[p[2]]
-			file.puts "{ {#{v[0]}f, #{v[1]}f, #{v[2]}f}, {#{n[0]}f, #{n[1]}f, #{n[2]}f}, {#{t[0]}, #{t[1]}} }, "
+			if equivalences[index] == index # unique references only
+				v = $vertices[p[0]]
+				n = $normals[p[1]]
+				t = $texcoord[p[2]]
+				file.puts "{ {#{v[0]}f, #{v[1]}f, #{v[2]}f}, {#{n[0]}f, #{n[1]}f, #{n[2]}f}, {#{t[0]}, #{t[1]}} }, "
+				indexRef[index] = numVerts
+				numVerts = numVerts + 1
+			else
+				indexRef[index] = indexRef[equivalences[index]]
+			end
+			index = index + 1
 		end
 		file.puts "};\n"
 		# indeces
@@ -212,9 +213,9 @@ def createHeader()
 		i = 0
 		$vcount.each do |c|
 			if c == 3 # triangle
-				file.write "#{i}, #{i+1}, #{i+2},  "
+				file.write "#{indexRef[i]}, #{indexRef[i+1]}, #{indexRef[i+2]},  "
 			elsif c == 4 # quad
-				file.write "#{i}, #{i+1}, #{i+2}, #{i}, #{i+2}, #{i+3},  "
+				file.write "#{indexRef[i]}, #{indexRef[i+1]}, #{indexRef[i+2]}, #{indexRef[i]}, #{indexRef[i+2]}, #{indexRef[i+3]},  "
 			else
 				puts "#{c}-gons not supported. Only triangles and quads"
 			end
@@ -298,12 +299,20 @@ end
 if __FILE__ == $0 # when included as a lib, this code won't execute :)
 	parseParameters()
 	parseColladaFile($filename)
-	#createHeader()
-	#puts "File saved to #{$outputfile}"
+	uvEq = findUVEquivalences($texcoord, 256, 256)
+	polyEq = findPolygonEquivalences($polygons, uvEq[:equivalences])
+	if uvEq[:redundant] > 0
+		puts "Found #{uvEq[:redundant]} redundant UV entries, out of #{$texcoord.size}."
+	end
+	if polyEq[:redundant] > 0
+		puts "Removed #{uvEq[:redundant]} redundant vertices."
+	end
+	if ((uvEq[:redundant]-polyEq[:redundant]).to_f/$texcoord.size.to_f)>= 0.25
+		puts "You should consider reducing the number of UV loops in your model."
+	end
+	createHeader(polyEq[:equivalences])
+	puts "File saved to #{$outputfile}"
 	if $debug && $isChunky
-		# Just to get an idea of how many UV coordinates are redundant.
-		uvEquivalences = findUVEquivalences($texcoord, 256, 256)
-		polyEquivalences = findPolygonEquivalences($polygons, uvEquivalences)
 		createDebugUVImage(128, 128, $debugUVfile)
 		puts "Debug UV image saved to #{$debugUVfile}"
 	end
