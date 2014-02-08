@@ -10,12 +10,20 @@
 ########################################################
 require "rexml/document"
 include REXML # to use "Element"
+$isChunky = true;
+begin
+	require "chunky_png"
+rescue LoadError
+	$isChunky = false;
+end
+	
 
 ########################################################
 # globals
 ########################################################
 $filename = ""
 $outputfile = ""
+$debugUVfile = ""
 $h_guard = ""
 $variableVertices = ""
 $variableIndeces = ""
@@ -24,6 +32,7 @@ $normals = []
 $texcoord = []
 $vcount = []
 $polygons = []
+$debug = false
 
 ########################################################
 # Collada parsing
@@ -95,6 +104,57 @@ def parseColladaFile(colladaFile)
 			end
 		end
 	}
+end
+
+def findUVEquivalences(uvArray, textureWidth, textureHeight)
+	hash = Hash.new
+	equivalences = Array.new
+	index = 0
+	redundantCount = 0
+	uvArray.each do |uv|
+		i = (textureWidth * uv[0]).round.to_i
+		j = textureHeight - (textureHeight * uv[1]).round.to_i 
+		key = "#{i},#{j}"
+		if hash[key].nil?
+			hash[key] = index
+			equivalences[index] = index
+		else
+			equivalences[index] = hash[key]
+			redundantCount = redundantCount + 1
+		end
+		index = index + 1
+	end
+	if redundantCount > 0
+		puts "Found #{redundantCount} redundant UV entries, out of #{uvArray.size}."
+		if (redundantCount.to_f/uvArray.size.to_f)>= 0.25
+			puts "You should consider reducing the number of UV loops in your model."
+		end
+	end
+	return equivalences
+end
+
+def findPolygonEquivalences(polys, uvEquivalences)
+	hash = Hash.new
+	equivalences = Array.new
+	index = 0
+	redundantCount = 0
+	polys.each do |p|
+		uvIndex = p[2]
+		uvIndex = uvEquivalences[uvIndex]
+		key = "#{p[0]},#{p[1]},uvIndex"
+		if hash[key].nil?
+			hash[key] = index
+			equivalences[index] = index
+		else
+			equivalences[index] = hash[key]
+			redundantCount = redundantCount + 1
+		end
+		index = index + 1		
+	end
+	if redundantCount > 0
+		puts "Found #{redundantCount} redundant vertices."
+	end
+	return equivalences
 end
 
 # a b c d e... -> {a, b} {c, d}  ...
@@ -170,13 +230,36 @@ def createHeader()
 	end
 end
 
+
+########################################################
+# Debug UVs
+########################################################
+def createDebugUVImage(width, height, filename)
+	png = ChunkyPNG::Image.new(width, height, ChunkyPNG::Color::TRANSPARENT)
+	$texcoord.each do |uv|
+		i = (width * uv[0]).round.to_i
+		j = height - (height * uv[1]).round.to_i
+		if i >= width || j >= height
+			puts "Out of bounds: #{i}, #{j}"
+		end
+		if png[i, j] != 0
+			# duplicate vertex
+			png[i, j] = ChunkyPNG::Color(255,0,0,255)
+		else
+			png[i, j] = ChunkyPNG::Color(0,255,0,255)
+		end
+	end
+	#puts $texcoord.size.to_s + " vertices"
+	png.save(filename, :interlace => false)
+end
+
 ########################################################
 # setup
 ########################################################
 
 def parseParameters()
-	if ARGV.size != 1
-		puts "#{__FILE__} filename"
+	if ARGV.size < 1
+		puts "#{__FILE__} filename [-debug]"
 		exit(0)
 	end
 	$filename = ARGV[0]
@@ -184,6 +267,10 @@ def parseParameters()
 	if !File.exists?($filename)
 		puts $filename + " doesn't exist."
 		exit(0)
+	end
+
+	if ARGV[1] == "-debug"
+		$debug = true
 	end
 
 	basename = File.basename($filename, File.extname( $filename ) )
@@ -194,6 +281,7 @@ def parseParameters()
 		$outputfile = basename + suffix
 		interfix += 1
 	end while File.exists?($outputfile)
+	$debugUVfile = basename + interfix.to_s + ".png"
 
 	# strings for code generation
 	basenameWithUnderscores = basename.gsub(/[\s-]/, '_') 
@@ -208,6 +296,13 @@ end
 if __FILE__ == $0 # when included as a lib, this code won't execute :)
 	parseParameters()
 	parseColladaFile($filename)
-	createHeader()
-	puts "File saved to #{$outputfile}"
+	#createHeader()
+	#puts "File saved to #{$outputfile}"
+	if $debug && $isChunky
+		# Just to get an idea of how many UV coordinates are redundant.
+		uvEquivalences = findUVEquivalences($texcoord, 256, 256)
+		polyEquivalences = findPolygonEquivalences($polygons, uvEquivalences)
+		createDebugUVImage(128, 128, $debugUVfile)
+		puts "Debug UV image saved to #{$debugUVfile}"
+	end
 end
