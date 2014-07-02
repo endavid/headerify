@@ -90,15 +90,20 @@ def parseColladaFile(colladaFile)
 					end
 				end
 			elsif child.name == "polylist"
+				numInputs = 0
 				child.children.each do |d|
 					if d.class!=Element
 						next
+					end
+					if d.name == "input"
+						# count number of inputs for the mapping
+						numInputs = numInputs + 1
 					end
 					if d.name == "vcount"
 						$vcount = d.text.split(" ").map { |n| n.to_i }
 					end
 					if d.name == "p"
-						$polygons = toVectorArray(d.text.split(" ").map { |n| n.to_i }, 3)
+						$polygons = toVectorArray(d.text.split(" ").map { |n| n.to_i }, numInputs)
 					end
 				end
 			end
@@ -134,6 +139,9 @@ def findPolygonEquivalences(polys, uvEquivalences)
 	redundantCount = 0
 	polys.each do |p|
 		uvIndex = p[2]
+		if uvIndex.nil? # missin UV coords
+			uvIndex = 0
+		end
 		uvIndex = uvEquivalences[uvIndex]
 		key = "#{p[0]},#{p[1]},uvIndex"
 		if hash[key].nil?
@@ -167,6 +175,7 @@ def toVectorArray(array, stride)
 	return out
 end
 
+# Convert Blender coordinates to OpenGL coordinates
 def invertAxis(vectorArray)
 	out = []
 	vectorArray.each do |v|
@@ -198,7 +207,16 @@ def createHeader(equivalences)
 			if equivalences[index] == index # unique references only
 				v = $vertices[p[0]]
 				n = $normals[p[1]]
-				t = $texcoord[p[2]]
+				t = [0, 0] # default texcoord for models without UVs
+				if !p[2].nil?
+					if !$texcoord[p[2]].nil?
+						t = $texcoord[p[2]]
+					end
+				end
+				if v.nil?
+					puts "Null vertex!"
+					next
+				end
 				file.puts "{ {#{v[0]}f, #{v[1]}f, #{v[2]}f}, {#{n[0]}f, #{n[1]}f, #{n[2]}f}, {#{t[0]}, #{t[1]}} }, "
 				indexRef[index] = numVerts
 				numVerts = numVerts + 1
