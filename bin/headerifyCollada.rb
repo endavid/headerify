@@ -25,17 +25,24 @@ $filename = ""
 $outputfile = ""
 $debugUVfile = ""
 $h_guard = ""
-$variableVertices = ""
-$variableIndeces = ""
+$variableNames = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindShapeMatrix", boneCount: "BoneCount", invBindM: "InverseBindMatrices", poseM: "DefaultPoseMatrices", keyframeCount: "KeyframeCount", keyframes: "KeyframesMs", animationM: "AnimationMatrices" }
 $vertices = []
 $normals = []
 $texcoord = []
 $vcount = []
 $polygons = []
+$bindShapeMatrix = []
+$boneCount = 0
+$boneNames = ""
+$invBindMatrices = []
+$weightArray = []
 $debug = false
 
 ########################################################
 # Collada parsing
+# 	Assume there's only one mesh,
+#	and if there's a skin and a skeletal animation, 
+#	assume it belongs to that mesh.
 ########################################################
 def parseColladaFile(colladaFile)
 	xmlfile = File.new(colladaFile)
@@ -109,8 +116,80 @@ def parseColladaFile(colladaFile)
 			end
 		end
 	}
+	# For skinned models (data will be empty otherwise)
+	weights = []
+	doc.root.elements.each("library_controllers/controller/skin") {|skin|
+		skin.children.each do |child|
+			if child.class!=Element # skip text lines
+				next
+			end
+			if child.name == "bind_shape_matrix"
+				$bindShapeMatrix = child.text.split(" ").map{|n| n.to_f}
+			elsif child.name == "source"
+				if child.attributes['id'].include? "joints"
+					# find boneCount and bone names
+					child.children.each do |sc|
+						if sc.class!=Element
+							next
+						end
+						if sc.name == "Name_array"
+							$boneNames = sc.text
+							$boneCount = sc.attributes['count'].to_i
+						end
+					end
+				elsif child.attributes['id'].include? "bind_poses"
+					# find the inverse bind matrices
+					child.children.each do |sc|
+						if sc.class!=Element
+							next
+						end
+						if sc.name == "float_array"
+							# count = sc.attributes['count'].to_i
+							$invBindMatrices = toVectorArray(sc.text.split(" ").map{|n| n.to_f}, 16)
+						end
+					end
+				elsif child.attributes['id'].include? "weights"
+					child.children.each do |sc|
+						if sc.class!=Element
+							next
+						end
+						if sc.name == "float_array"
+							# count = sc.attributes['count'].to_i
+							weights = sc.text.split(" ").map{|n| n.to_f}
+						end
+					end
+				end	
+			elsif child.name == "vertex_weights"
+				numInputs = 0
+				vcountWeights = []
+				jointWeightIndices = []
+				child.children.each do |d|
+					if d.class!=Element
+						next
+					end
+					if d.name == "input"
+						# count number of inputs for the mapping
+						numInputs = numInputs + 1
+					end
+					if d.name == "vcount"
+						vcountWeights = d.text.split(" ").map { |n| n.to_i }
+					end
+					if d.name == "v"
+						jointWeightIndices = toVectorArray(d.text.split(" ").map { |n| n.to_i }, numInputs)
+					end
+				end
+				$weightArray = mapWeightsPerVertex(vcountWeights, jointWeightIndices, weights)
+			end
+		end
+	}
+	#puts $weightArray.inspect
+	#puts $bindShapeMatrix.inspect
+	#puts $boneCount.to_s
+	#puts $boneNames
+	#puts $invBindMatrices.inspect
 end
 
+# same UVs?
 def findUVEquivalences(uvArray, textureWidth, textureHeight)
 	hash = Hash.new
 	equivalences = Array.new
@@ -132,6 +211,7 @@ def findUVEquivalences(uvArray, textureWidth, textureHeight)
 	return {:equivalences => equivalences, :redundant => redundantCount}
 end
 
+# same polygons?
 def findPolygonEquivalences(polys, uvEquivalences)
 	hash = Hash.new
 	equivalences = Array.new
@@ -139,7 +219,7 @@ def findPolygonEquivalences(polys, uvEquivalences)
 	redundantCount = 0
 	polys.each do |p|
 		uvIndex = p[2]
-		if uvIndex.nil? # missin UV coords
+		if uvIndex.nil? # missing UV coords
 			uvIndex = 0
 		end
 		uvIndex = uvEquivalences[uvIndex]
@@ -154,6 +234,35 @@ def findPolygonEquivalences(polys, uvEquivalences)
 		index = index + 1		
 	end
 	return {:equivalences => equivalences, :redundant => redundantCount}
+end
+
+# create a hash to access weights more easily
+def mapWeightsPerVertex(vcount, v, weights)
+	moreThan3Count = 0
+	iV = 0
+	iWeightArray = 0
+	weightArray = []
+	vcount.each do |jointsPerVertex|
+		if jointsPerVertex > 3
+			moreThan3Count += 1
+		end
+		jointWeightPairs = []
+		for j in 0..(jointsPerVertex-1)
+			if j <= 3 # if there are more joints, ignore
+				jointIndex = v[iV][0]
+				weightIndex = v[iV][1]
+				weight = weights[weightIndex]
+				jointWeightPairs[j] = [jointIndex, weight]
+			end
+			iV += 1
+		end
+		weightArray[iWeightArray] = jointWeightPairs
+		iWeightArray += 1
+	end
+	if moreThan3Count > 0
+		puts "There are #{moreThan3Count} vertices with more than 3 joint contributions! Ignoring the 4th joint onwards..."
+	end
+	return weightArray
 end
 
 # a b c d e... -> {a, b} {c, d}  ...
@@ -189,6 +298,26 @@ def invertAxis(vectorArray)
 end
 
 ########################################################
+# Printing functions
+########################################################
+# 1, 0.5, 1 -> "{1f, 0.5f, 1f}"
+def printVector(v)
+	return "{" + (v.map{|n| "#{n}f"}.join(', ')) + "}"
+end
+# 1, 2, 1 -> "{1, 2, 1}"
+def printVectorInt(v)
+	return "{" + (v.map{|n| "#{n}"}.join(', ')) + "}"
+end
+# 1, 0.5, 1, ... -> "math::Matrix(1f, 0.5f, 1f, ...)"
+def printMatrix(m)
+	return "math::Matrix4(" + (m.map{|n| "#{n}f"}.join(', ')) + ")"
+end
+# several lines of math::Matrix(...) data
+def printMatrices(mm)
+	return mm.map{|m| "\t"+printMatrix(m)}.join(",\n")
+end
+
+########################################################
 # Create header
 ########################################################
 def createHeader(equivalences)
@@ -198,8 +327,14 @@ def createHeader(equivalences)
 		file.puts " */" 
 		file.puts "\#ifndef #{$h_guard}"
 		file.puts "\#define #{$h_guard}\n\n"
+
+		datatype = "vertexDataTextured"
+		if $boneCount > 0
+			datatype = "vertexDataSkinned"
+		end
+
 		# vertices
-		file.puts "static const vertexDataTextured #{$variableVertices}[] = {"
+		file.puts "static const #{datatype} #{$variableNames[:vertices]}[] = {"
 		index = 0
 		numVerts = 0
 		indexRef = Array.new
@@ -217,7 +352,20 @@ def createHeader(equivalences)
 					puts "Null vertex!"
 					next
 				end
-				file.puts "{ {#{v[0]}f, #{v[1]}f, #{v[2]}f}, {#{n[0]}f, #{n[1]}f, #{n[2]}f}, {#{t[0]}, #{t[1]}} }, "
+				file.write "\t{ " + printVector(v) + ", " + printVector(n) + ", " + printVector(t)
+				if $boneCount > 0
+					w = [1, 0, 0] # weights of the joints
+					joints = [0, 0, 0, 0]
+					wj = $weightArray[p[0]]
+					wji = 0
+					wj.each do |jointWeightPair|
+						joints[wji] = jointWeightPair[0]
+						w[wji] = jointWeightPair[1]
+						wji += 1
+					end
+					file.write ", "+printVector(w)+", "+printVectorInt(joints)
+				end
+				file.write " }, \n"
 				indexRef[index] = numVerts
 				numVerts = numVerts + 1
 			else
@@ -226,8 +374,8 @@ def createHeader(equivalences)
 			index = index + 1
 		end
 		file.puts "};\n"
-		# indeces
-		file.puts "static const GLushort #{$variableIndeces}[] = {"
+		# indices
+		file.puts "static const GLushort #{$variableNames[:indices]}[] = {"
 		i = 0
 		$vcount.each do |c|
 			if c == 3 # triangle
@@ -241,6 +389,17 @@ def createHeader(equivalences)
 		end
 		file.puts "\n};\n"
 
+		#skinned mesh?
+		if $boneCount > 0
+			file.write "\n// Skinned Mesh Data\n//--------------------------------------\n"
+			file.write "static const math::Matrix4 #{$variableNames[:bindShapeM]} = " + printMatrix($bindShapeMatrix) + ";\n"
+			file.write "static const uint16_t #{$variableNames[:boneCount]} = #{$boneCount};\n"
+			file.write "// Bone names: #{$boneNames}\n\n"
+			file.write "static const math::Matrix4 #{$variableNames[:invBindM]} = {\n" + printMatrices($invBindMatrices) + "\n};\n"
+
+		end # skinned mesh
+
+		# end header
 		file.puts "\#endif // #{$h_guard}"
 	rescue IOError => e
 		#some error occur, dir not writable etc.
@@ -307,8 +466,10 @@ def parseParameters()
 	# strings for code generation
 	basenameWithUnderscores = basename.gsub(/[\s-]/, '_') 
 	$h_guard = "MODEL_"+ basenameWithUnderscores.upcase+"_H_"
-	$variableVertices = "g_#{basename}Vertices"
-	$variableIndeces = "g_#{basename}Indeces"
+	# add g_modelName to the variable names
+	$variableNames.each do |key, value|
+		$variableNames[key] = "g_#{basename}#{value}"
+	end
 end
 
 ########################################################
