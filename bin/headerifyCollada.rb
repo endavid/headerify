@@ -26,7 +26,7 @@ $filename = ""
 $outputfile = ""
 $debugUVfile = ""
 $h_guard = ""
-$variableNames = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindShapeMatrix", jointCount: "JointCount", boneCount: "BoneCount", invBindM: "InverseBindMatrices", jTT: "JointTransformTree", jointIndices: "JointToSkeletonIndices", animation: "AnimationData", keyframes: "Keyframes", matrices: "Matrices" }
+$variableNames = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindShapeMatrix", jointCount: "JointCount", boneCount: "BoneCount", invBindM: "InverseBindMatrices", jTT: "JointTransformTree", jointIndices: "JointToSkeletonIndices", armatureM: "ArmatureTransform", animation: "AnimationData", keyframes: "Keyframes", matrices: "Matrices" }
 $vertices = []
 $normals = []
 $texcoord = []
@@ -41,8 +41,8 @@ $skeleton = {}
 $skeletonNodeNames = []
 $jointIndexToSkeletonIndex = []
 $animations = {}
+$armatureTransform = []
 $debug = false
-$force = true
 
 ########################################################
 # Collada parsing
@@ -72,10 +72,6 @@ def parseColladaFile(colladaFile)
 						end
 						if sc.name == "float_array"
 							$vertices = toVectorArray(sc.text.split(" ").map{|n| n.to_f}, 3)
-							if invert_axis
-								$vertices = invertAxis($vertices)
-							end
-							#puts $vertices.inspect
 						end
 					end
 				end
@@ -86,9 +82,6 @@ def parseColladaFile(colladaFile)
 						end
 						if sc.name == "float_array"
 							$normals = toVectorArray(sc.text.split(" ").map{|n| n.to_f}, 3)
-							if invert_axis
-								$normals = invertAxis($normals)
-							end
 						end
 					end
 				end
@@ -190,7 +183,7 @@ def parseColladaFile(colladaFile)
 	}
 	doc.root.elements.each("library_visual_scenes/visual_scene/node") {|node|
 		if node.attributes['id'] == "Armature"
-			$skeleton = extractBoneTree(node, "")
+			$skeleton = extractBoneTree(node, "", invert_axis)
 			boneIndex = 0
 			$skeleton.each{|k, v|
 				$skeletonNodeNames << k
@@ -200,6 +193,10 @@ def parseColladaFile(colladaFile)
 				end
 				boneIndex += 1
 			}
+			# extract Armature transform
+			$armatureTransform = extractTransform(node)
+				
+			#puts $armatureTransform.inspect
 			#puts $skeletonNodeNames.inspect
 			#puts $skeleton.inspect
 			#puts $jointIndexToSkeletonIndex.inspect
@@ -236,6 +233,9 @@ def parseColladaFile(colladaFile)
 							if sc.name == "float_array"
 								# count = sc.attributes['count'].to_i
 								animationNode[:matrices] = toVectorArray(sc.text.split(" ").map{|n| n.to_f}, 16)
+								if invert_axis
+									animationNode[:matrices] = invertAxisMatrices(animationNode[:matrices])
+								end
 							end
 						end
 					end
@@ -246,13 +246,22 @@ def parseColladaFile(colladaFile)
 		end # boneId != nil
 	}
 
+	# (x, y, z) -> (x, z, -y)
+	if invert_axis
+		$vertices = invertAxis($vertices)
+		$normals = invertAxis($normals)
+		$invBindMatrices = invertAxisMatrices($invBindMatrices)
+		$armatureTransform = invertAxisMatrix($armatureTransform)
+	end
+
 	#puts $weightArray.inspect
 	#puts $bindShapeMatrix.inspect
 	#puts $invBindMatrices.inspect
 	#puts $animations.inspect
 end
 
-def extractBoneTree(node, parentId)
+# Recursively explore the Armature and extract all the transform matrices
+def extractBoneTree(node, parentId, invert_axis)
 	h = {}
 	nodeId = node.attributes['id']
 	node.children.each do |child|
@@ -261,12 +270,48 @@ def extractBoneTree(node, parentId)
 		end
 		if child.name == "matrix"
 			matrix = child.text.split(" ").map{|n| n.to_f}
+			if invert_axis
+				matrix = invertAxisMatrix(matrix)
+			end
 			h[nodeId] = {transform: matrix, parentId: parentId}
 		elsif child.name == "node"
-			h.merge!(extractBoneTree(child, nodeId))
+			h.merge!(extractBoneTree(child, nodeId, invert_axis))
 		end
 	end
 	return h
+end
+
+# Extract rotation, translation and scale nodes and create a transform matrix
+def extractTransform(node)
+	t = [0.0, 0.0, 0.0]
+	rx = [1.0, 0.0, 0.0, 0.0]
+	ry = [0.0, 1.0, 0.0, 0.0]
+	rz = [0.0, 0.0, 1.0, 0.0]
+	s = [1.0, 1.0, 1.0]
+	node.children.each do |child|
+		if child.class!=Element # skip text lines
+			next
+		end
+		if child.name == "translate"
+			t = child.text.split(" ").map{|n| n.to_f}
+		elsif child.name == "rotate"
+			rot = child.text.split(" ").map{|n| n.to_f}
+			if child.attributes['sid'] == "rotationX"
+				rx = rot
+			elsif child.attributes['sid'] == "rotationY"
+				ry = rot
+			elsif child.attributes['sid'] == "rotationZ"
+				rz = rot
+			end
+		elsif child.name == "scale"
+			s = child.text.split(" ").map{|n| n.to_f}
+		end
+	end
+	transform = 	[rx[0] * s[0], ry[0] * s[1], rz[0] * s[2], t[0],
+					 rx[1] * s[0], ry[1] * s[1], rz[1] * s[2], t[1],
+					 rx[2] * s[0], ry[2] * s[1], rz[2] * s[2], t[2],
+					 rx[3]       , ry[3]       , rz[3]       , 1.0]
+	return transform
 end
 
 # same UVs?
@@ -366,15 +411,15 @@ end
 
 # Convert Blender coordinates to OpenGL coordinates
 def invertAxis(vectorArray)
-	out = []
-	vectorArray.each do |v|
-		vi = []
-		vi[0] = v[0]
-		vi[1] = v[2]
-		vi[2] = -v[1]
-		out << vi
-	end
-	return out
+	return vectorArray.map{|v| [v[0], v[2], -v[1]]}
+end
+
+def invertAxisMatrix(m)
+	return [m[0], m[2], -m[1], m[3], m[8], m[10], -m[9], m[11], -m[4], -m[6], m[5], -m[7], m[12], m[14], -m[13], m[15]]
+end
+
+def invertAxisMatrices(matrixArray)
+	return matrixArray.map{|m| invertAxisMatrix(m)}
 end
 
 ########################################################
@@ -490,6 +535,8 @@ def createHeader(equivalences)
 			}
 			file.write "};\n"
 			file.write "static const uint16_t #{$variableNames[:jointIndices]}[] = " + printVectorInt($jointIndexToSkeletonIndex) + ";\n\n"
+			file.write "// Transform for the whole skeleton\n"
+			file.write "static const math::Matrix4 #{$variableNames[:armatureM]} = " + printMatrix($armatureTransform) + ";\n\n"
 			file.write "// Animation of each bone {keyframeCount, keyframeArray, Matrix4array}\n"
 			$animations.each do |k, v|
 				boneId = k
@@ -552,8 +599,10 @@ end
 # setup
 ########################################################
 
-def parseParametersTest()
-	opt_parser = OptionParser.new do |opts|
+def parseParameters()
+	force = false # overwrite file?
+
+	parser = OptionParser.new do |opts|
 		opts.banner = "Usage: #{__FILE__} [options]"
 		opts.separator ""
 		opts.separator "Specific options:"
@@ -561,18 +610,20 @@ def parseParametersTest()
 			$debug = true
 		end
 		opts.on("-f", "--force", "Overwrites any existing header file") do |v|
-			$force = true
+			force = true
+		end
+		opts.on('-h', '--help', 'Displays Help') do
+			puts opts
+			exit
+		end
+		if ARGV.size < 1
+			puts opts
+			exit
 		end
 	end
-	opt_parser.parse(ARGV)
-	puts ARGV.inspect
-end
+	parser.parse!
 
-def parseParameters()
-	if ARGV.size < 1
-		puts "#{__FILE__} filename [-debug]"
-		exit(0)
-	end
+	# ARGV shouldn't contain any optional parameter after parse!
 	$filename = ARGV[0]
 
 	if !File.exists?($filename)
@@ -586,7 +637,7 @@ def parseParameters()
 
 	basename = File.basename($filename, File.extname( $filename ) )
 
-	if $force
+	if force
 		$outputfile = basename + ".h"
 		$debugUVfile = basename + ".png"
 	else
