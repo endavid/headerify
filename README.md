@@ -9,9 +9,21 @@ TexturePackerExporters
 
 bin/headerifyCollada.rb
 ========================
-* Converts the geometry inside .dae Collada files to C syntax.
-* I use it to convert files exported from Blender to data directly usabe in OpenGL. 
-* When the up axis is set to Z (Blender exporter), axis are converted to OpenGL (y'=z, z'=-y)   
+
+Converts the geometry inside .dae Collada files to C++ syntax.
+I use this to convert files exported from Blender to data directly usable in OpenGL.
+
+### Features ###
+* When the up axis is set to Z (Blender exporter), axis are converted to OpenGL (y'=z, z'=-y)
+* Works with texture & untextured data
+* Exports also skeletons and animations
+* Datatype definitions included for reference (check the include folder)
+
+### Limitations ###
+* The script assumes there's only one mesh in the scene! Otherwise, expect the unexpected ;)
+ 
+[![Skinned mesh example](http://img.youtube.com/vi/Ss_yHuEVG8s/0.jpg)](https://www.youtube.com/watch?v=Ss_yHuEVG8s)
+
 
 bin/headerifyFont.rb
 =====================
@@ -42,7 +54,7 @@ License
 =======
 MIT License
 
-Copyright (C) 2013 David Gavilan Ruiz
+Copyright (C) 2013-2014 David Gavilan Ruiz
  
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
