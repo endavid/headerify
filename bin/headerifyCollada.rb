@@ -8,6 +8,7 @@
 # @author David Gavilan
 #
 ########################################################
+require "optparse" # to parse arguments
 require "rexml/document"
 include REXML # to use "Element"
 $isChunky = true;
@@ -25,18 +26,23 @@ $filename = ""
 $outputfile = ""
 $debugUVfile = ""
 $h_guard = ""
-$variableNames = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindShapeMatrix", boneCount: "BoneCount", invBindM: "InverseBindMatrices", poseM: "DefaultPoseMatrices", keyframeCount: "KeyframeCount", keyframes: "KeyframesMs", animationM: "AnimationMatrices" }
+$variableNames = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindShapeMatrix", jointCount: "JointCount", boneCount: "BoneCount", invBindM: "InverseBindMatrices", jTT: "JointTransformTree", jointIndices: "JointToSkeletonIndices", animation: "AnimationData", keyframes: "Keyframes", matrices: "Matrices" }
 $vertices = []
 $normals = []
 $texcoord = []
 $vcount = []
 $polygons = []
 $bindShapeMatrix = []
-$boneCount = 0
-$boneNames = ""
+$jointCount = 0
+$jointNames = []
 $invBindMatrices = []
 $weightArray = []
+$skeleton = {}
+$skeletonNodeNames = []
+$jointIndexToSkeletonIndex = []
+$animations = {}
 $debug = false
+$force = true
 
 ########################################################
 # Collada parsing
@@ -133,8 +139,8 @@ def parseColladaFile(colladaFile)
 							next
 						end
 						if sc.name == "Name_array"
-							$boneNames = sc.text
-							$boneCount = sc.attributes['count'].to_i
+							$jointNames = sc.text.split(" ")
+							$jointCount = sc.attributes['count'].to_i
 						end
 					end
 				elsif child.attributes['id'].include? "bind_poses"
@@ -182,11 +188,85 @@ def parseColladaFile(colladaFile)
 			end
 		end
 	}
+	doc.root.elements.each("library_visual_scenes/visual_scene/node") {|node|
+		if node.attributes['id'] == "Armature"
+			$skeleton = extractBoneTree(node, "")
+			boneIndex = 0
+			$skeleton.each{|k, v|
+				$skeletonNodeNames << k
+				jointIndex = $jointNames.index(k)
+				if !jointIndex.nil?
+					$jointIndexToSkeletonIndex[jointIndex] = boneIndex
+				end
+				boneIndex += 1
+			}
+			#puts $skeletonNodeNames.inspect
+			#puts $skeleton.inspect
+			#puts $jointIndexToSkeletonIndex.inspect
+		end
+	}
+	# animations of the bones in the skeleton
+	doc.root.elements.each("library_animations/animation") {|anim|
+		boneId = /Armature_(.+)_pose_matrix/.match(anim.attributes['id'])[1]
+		boneIndex = $skeletonNodeNames.index(boneId)
+		if !boneId.nil?
+			animationNode = {keyframes: [], matrices: []}
+			anim.children.each do |child|
+				if child.class!=Element # skip text lines
+					next
+				end
+				if child.name == "source"
+					if child.attributes['id'].include? "matrix-input"
+						# keyframes
+						child.children.each do |sc|
+							if sc.class!=Element
+								next
+							end
+							if sc.name == "float_array"
+								# count = sc.attributes['count'].to_i
+								animationNode[:keyframes] = sc.text.split(" ").map{|n| n.to_f}
+							end
+						end
+					elsif child.attributes['id'].include? "matrix-output"
+						# interpolation matrices
+						child.children.each do |sc|
+							if sc.class!=Element
+								next
+							end
+							if sc.name == "float_array"
+								# count = sc.attributes['count'].to_i
+								animationNode[:matrices] = toVectorArray(sc.text.split(" ").map{|n| n.to_f}, 16)
+							end
+						end
+					end
+					# don't check interpolation node. Assume LINEAR for all.
+				end # source
+			end # child
+			$animations[boneId] = animationNode
+		end # boneId != nil
+	}
+
 	#puts $weightArray.inspect
 	#puts $bindShapeMatrix.inspect
-	#puts $boneCount.to_s
-	#puts $boneNames
 	#puts $invBindMatrices.inspect
+	#puts $animations.inspect
+end
+
+def extractBoneTree(node, parentId)
+	h = {}
+	nodeId = node.attributes['id']
+	node.children.each do |child|
+		if child.class!=Element # skip text lines
+			next
+		end
+		if child.name == "matrix"
+			matrix = child.text.split(" ").map{|n| n.to_f}
+			h[nodeId] = {transform: matrix, parentId: parentId}
+		elsif child.name == "node"
+			h.merge!(extractBoneTree(child, nodeId))
+		end
+	end
+	return h
 end
 
 # same UVs?
@@ -302,7 +382,7 @@ end
 ########################################################
 # 1, 0.5, 1 -> "{1f, 0.5f, 1f}"
 def printVector(v)
-	return "{" + (v.map{|n| "#{n}f"}.join(', ')) + "}"
+	return "{" + (v.map{|n| "#{n.to_s}f"}.join(', ')) + "}"
 end
 # 1, 2, 1 -> "{1, 2, 1}"
 def printVectorInt(v)
@@ -329,7 +409,7 @@ def createHeader(equivalences)
 		file.puts "\#define #{$h_guard}\n\n"
 
 		datatype = "vertexDataTextured"
-		if $boneCount > 0
+		if $jointCount > 0
 			datatype = "vertexDataSkinned"
 		end
 
@@ -342,7 +422,7 @@ def createHeader(equivalences)
 			if equivalences[index] == index # unique references only
 				v = $vertices[p[0]]
 				n = $normals[p[1]]
-				t = [0, 0] # default texcoord for models without UVs
+				t = [0.0, 0.0] # default texcoord for models without UVs
 				if !p[2].nil?
 					if !$texcoord[p[2]].nil?
 						t = $texcoord[p[2]]
@@ -353,14 +433,16 @@ def createHeader(equivalences)
 					next
 				end
 				file.write "\t{ " + printVector(v) + ", " + printVector(n) + ", " + printVector(t)
-				if $boneCount > 0
-					w = [1, 0, 0] # weights of the joints
+				if $jointCount > 0
+					w = [1.0, 0.0, 0.0] # weights of the joints
 					joints = [0, 0, 0, 0]
 					wj = $weightArray[p[0]]
 					wji = 0
 					wj.each do |jointWeightPair|
-						joints[wji] = jointWeightPair[0]
-						w[wji] = jointWeightPair[1]
+						if wji < 3
+							joints[wji] = jointWeightPair[0]
+							w[wji] = jointWeightPair[1]
+						end
 						wji += 1
 					end
 					file.write ", "+printVector(w)+", "+printVectorInt(joints)
@@ -390,12 +472,45 @@ def createHeader(equivalences)
 		file.puts "\n};\n"
 
 		#skinned mesh?
-		if $boneCount > 0
+		if $jointCount > 0
 			file.write "\n// Skinned Mesh Data\n//--------------------------------------\n"
 			file.write "static const math::Matrix4 #{$variableNames[:bindShapeM]} = " + printMatrix($bindShapeMatrix) + ";\n"
-			file.write "static const uint16_t #{$variableNames[:boneCount]} = #{$boneCount};\n"
-			file.write "// Bone names: #{$boneNames}\n\n"
-			file.write "static const math::Matrix4 #{$variableNames[:invBindM]} = {\n" + printMatrices($invBindMatrices) + "\n};\n"
+			file.write "static const uint16_t #{$variableNames[:boneCount]} = #{$skeletonNodeNames.size};\n";
+			file.write "static const uint16_t #{$variableNames[:jointCount]} = #{$jointCount};\n"
+			file.write "// Bone names: #{$jointNames.join(', ')}\n\n"
+			file.write "static const math::Matrix4 #{$variableNames[:invBindM]}[] = {\n" + printMatrices($invBindMatrices) + "\n};\n"
+			file.write "static struct core::TreeNode<math::Matrix4> #{$variableNames[:jTT]}[] = {\n"
+			$skeleton.each{|k, v|
+				i = $skeletonNodeNames.index(k)
+				parentIndex = $skeletonNodeNames.index(v[:parentId])
+				if parentIndex.nil? # when a node has no parent, it's denoted by pointing to itself
+					parentIndex = i
+				end
+				file.write("\t/*#{i}: #{k}*/{#{parentIndex}, " + printMatrix(v[:transform]) + "}, \n")
+			}
+			file.write "};\n"
+			file.write "static const uint16_t #{$variableNames[:jointIndices]}[] = " + printVectorInt($jointIndexToSkeletonIndex) + ";\n\n"
+			file.write "// Animation of each bone {keyframeCount, keyframeArray, Matrix4array}\n"
+			$animations.each do |k, v|
+				boneId = k
+				# convert secs to millisecs
+				file.write "static const float #{$variableNames[:keyframes]}_#{boneId}[] = " + printVector(v[:keyframes].map{|n| 1000 * n}) + ";\n"
+				file.write "static const math::Matrix4 #{$variableNames[:matrices]}_#{boneId}[] = {\n" + printMatrices(v[:matrices]) + "};\n"
+			end
+			file.write "static const gfx::MatrixAnimData #{$variableNames[:animation]}[] = {\n"
+			$skeletonNodeNames.each do |boneId| # place them in the same order!
+				keyframeCount = 0
+				keyframes = "NULL"
+				animationMatrices = "NULL"
+				animationNode = $animations[boneId]
+				if !animationNode.nil?
+					keyframeCount = animationNode[:keyframes].size
+					keyframes = "#{$variableNames[:keyframes]}_#{boneId}"
+					animationMatrices = "#{$variableNames[:matrices]}_#{boneId}"
+				end
+				file.write "\t{ #{keyframeCount}, #{keyframes}, #{animationMatrices} },\n"
+			end
+			file.write "};\n\n"
 
 		end # skinned mesh
 
@@ -437,6 +552,22 @@ end
 # setup
 ########################################################
 
+def parseParametersTest()
+	opt_parser = OptionParser.new do |opts|
+		opts.banner = "Usage: #{__FILE__} [options]"
+		opts.separator ""
+		opts.separator "Specific options:"
+		opts.on("-d", "--debug", "Generate a PNG file with UVs") do |v|
+			$debug = true
+		end
+		opts.on("-f", "--force", "Overwrites any existing header file") do |v|
+			$force = true
+		end
+	end
+	opt_parser.parse(ARGV)
+	puts ARGV.inspect
+end
+
 def parseParameters()
 	if ARGV.size < 1
 		puts "#{__FILE__} filename [-debug]"
@@ -454,14 +585,20 @@ def parseParameters()
 	end
 
 	basename = File.basename($filename, File.extname( $filename ) )
-	# find unique output filename (avoid overwriting existing files)
-	interfix = 0
-	begin
-		suffix = interfix > 0 ? "_" + interfix.to_s + ".h" : ".h"
-		$outputfile = basename + suffix
-		interfix += 1
-	end while File.exists?($outputfile)
-	$debugUVfile = basename + interfix.to_s + ".png"
+
+	if $force
+		$outputfile = basename + ".h"
+		$debugUVfile = basename + ".png"
+	else
+		# find unique output filename (avoid overwriting existing files)
+		interfix = 0
+		begin
+			suffix = interfix > 0 ? "_" + interfix.to_s + ".h" : ".h"
+			$outputfile = basename + suffix
+			interfix += 1
+		end while File.exists?($outputfile)
+		$debugUVfile = basename + interfix.to_s + ".png"
+	end
 
 	# strings for code generation
 	basenameWithUnderscores = basename.gsub(/[\s-]/, '_') 
@@ -477,7 +614,7 @@ end
 ########################################################
 if __FILE__ == $0 # when included as a lib, this code won't execute :)
 	parseParameters()
-	parseColladaFile($filename)
+	parseColladaFile($filename)	
 	uvEq = findUVEquivalences($texcoord, 256, 256)
 	polyEq = findPolygonEquivalences($polygons, uvEq[:equivalences])
 	if uvEq[:redundant] > 0
