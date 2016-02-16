@@ -10,6 +10,7 @@
 ########################################################
 require "optparse" # to parse arguments
 require "rexml/document"
+require "pp"
 include REXML # to use "Element"
 $isChunky = true;
 begin
@@ -17,7 +18,7 @@ begin
 rescue LoadError
 	$isChunky = false;
 end
-	
+
 
 ########################################################
 # globals
@@ -30,8 +31,8 @@ $variableNames = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindSh
 $vertices = []
 $normals = []
 $texcoord = []
-$vcount = []
-$polygons = []
+$vcount = {}
+$polygons = {}
 $bindShapeMatrix = []
 $jointCount = 0
 $jointNames = []
@@ -47,7 +48,7 @@ $debug = false
 ########################################################
 # Collada parsing
 # 	Assume there's only one mesh,
-#	and if there's a skin and a skeletal animation, 
+#	and if there's a skin and a skeletal animation,
 #	assume it belongs to that mesh.
 ########################################################
 def parseColladaFile(colladaFile)
@@ -85,7 +86,7 @@ def parseColladaFile(colladaFile)
 						end
 					end
 				end
-				if child.attributes['id'].include? "map"
+				if (child.attributes['id'].include? "map") || (child.attributes['id'].include? "uvs")
 					child.children.each do |sc|
 						if sc.class!=Element
 							next
@@ -96,6 +97,7 @@ def parseColladaFile(colladaFile)
 					end
 				end
 			elsif child.name == "polylist"
+				submeshId = child.attributes['material']
 				numInputs = 0
 				child.children.each do |d|
 					if d.class!=Element
@@ -106,10 +108,10 @@ def parseColladaFile(colladaFile)
 						numInputs = numInputs + 1
 					end
 					if d.name == "vcount"
-						$vcount = d.text.split(" ").map { |n| n.to_i }
+						$vcount[submeshId] = d.text.split(" ").map { |n| n.to_i }
 					end
 					if d.name == "p"
-						$polygons = toVectorArray(d.text.split(" ").map { |n| n.to_i }, numInputs)
+						$polygons[submeshId] = toVectorArray(d.text.split(" ").map { |n| n.to_i }, numInputs)
 					end
 				end
 			end
@@ -157,7 +159,7 @@ def parseColladaFile(colladaFile)
 							weights = sc.text.split(" ").map{|n| n.to_f}
 						end
 					end
-				end	
+				end
 			elsif child.name == "vertex_weights"
 				numInputs = 0
 				vcountWeights = []
@@ -182,7 +184,7 @@ def parseColladaFile(colladaFile)
 		end
 	}
 	doc.root.elements.each("library_visual_scenes/visual_scene/node") {|node|
-		if node.attributes['id'] == "Armature"
+		if node.attributes['type'] == "NODE"
 			$skeleton = extractBoneTree(node, "", invert_axis)
 			boneIndex = 0
 			$skeleton.each{|k, v|
@@ -195,7 +197,7 @@ def parseColladaFile(colladaFile)
 			}
 			# extract Armature transform
 			$armatureTransform = extractTransform(node)
-				
+
 			#puts $armatureTransform.inspect
 			#puts $skeletonNodeNames.inspect
 			#puts $skeleton.inspect
@@ -322,7 +324,7 @@ def findUVEquivalences(uvArray, textureWidth, textureHeight)
 	redundantCount = 0
 	uvArray.each do |uv|
 		i = (textureWidth * uv[0]).round.to_i
-		j = textureHeight - (textureHeight * uv[1]).round.to_i 
+		j = textureHeight - (textureHeight * uv[1]).round.to_i
 		key = "#{i},#{j}"
 		if hash[key].nil?
 			hash[key] = index
@@ -356,7 +358,7 @@ def findPolygonEquivalences(polys, uvEquivalences)
 			equivalences[index] = hash[key]
 			redundantCount = redundantCount + 1
 		end
-		index = index + 1		
+		index = index + 1
 	end
 	return {:equivalences => equivalences, :redundant => redundantCount}
 end
@@ -452,7 +454,7 @@ def createHeader(equivalences)
 	begin
 		file = File.open($outputfile, "w")
 		file.puts "/**\n * @file #{$outputfile}"
-		file.puts " */" 
+		file.puts " */"
 		file.puts "\#ifndef #{$h_guard}"
 		file.puts "\#define #{$h_guard}\n\n"
 
@@ -462,62 +464,66 @@ def createHeader(equivalences)
 		end
 
 		# vertices
-		file.puts "static const #{datatype} #{$variableNames[:vertices]}[] = {"
 		index = 0
 		numVerts = 0
 		indexRef = Array.new
-		$polygons.each do |p|
-			if equivalences[index] == index # unique references only
-				v = $vertices[p[0]]
-				n = $normals[p[1]]
-				t = [0.0, 0.0] # default texcoord for models without UVs
-				if !p[2].nil?
-					if !$texcoord[p[2]].nil?
-						t = $texcoord[p[2]]
-					end
-				end
-				if v.nil?
-					puts "Null vertex!"
-					next
-				end
-				file.write "\t{ " + printVector(v) + ", " + printVector(n) + ", " + printVector(t)
-				if $jointCount > 0
-					w = [1.0, 0.0, 0.0] # weights of the joints
-					joints = [0, 0, 0, 0]
-					wj = $weightArray[p[0]]
-					wji = 0
-					wj.each do |jointWeightPair|
-						if wji < 3
-							joints[wji] = jointWeightPair[0]
-							w[wji] = jointWeightPair[1]
+		$polygons.each do |submeshId, polylist|
+			file.puts "static const #{datatype} #{$variableNames[:vertices]}_#{submeshId}[] = {"
+			polylist.each do |p|
+				if equivalences[index] == index # unique references only
+					v = $vertices[p[0]]
+					n = $normals[p[1]]
+					t = [0.0, 0.0] # default texcoord for models without UVs
+					if !p[2].nil?
+						if !$texcoord[p[2]].nil?
+							t = $texcoord[p[2]]
 						end
-						wji += 1
 					end
-					file.write ", "+printVector(w)+", "+printVectorInt(joints)
+					if v.nil?
+						puts "Null vertex!"
+						next
+					end
+					file.write "\t{ " + printVector(v) + ", " + printVector(n) + ", " + printVector(t)
+					if $jointCount > 0
+						w = [1.0, 0.0, 0.0] # weights of the joints
+						joints = [0, 0, 0, 0]
+						wj = $weightArray[p[0]]
+						wji = 0
+						wj.each do |jointWeightPair|
+							if wji < 3
+								joints[wji] = jointWeightPair[0]
+								w[wji] = jointWeightPair[1]
+							end
+							wji += 1
+						end
+						file.write ", "+printVector(w)+", "+printVectorInt(joints)
+					end
+					file.write " }, \n"
+					indexRef[index] = numVerts
+					numVerts = numVerts + 1
+				else
+					indexRef[index] = indexRef[equivalences[index]]
 				end
-				file.write " }, \n"
-				indexRef[index] = numVerts
-				numVerts = numVerts + 1
-			else
-				indexRef[index] = indexRef[equivalences[index]]
-			end
-			index = index + 1
+				index = index + 1
+			end # polylist
+			file.puts "};\n"
 		end
-		file.puts "};\n"
 		# indices
-		file.puts "static const GLushort #{$variableNames[:indices]}[] = {"
 		i = 0
-		$vcount.each do |c|
-			if c == 3 # triangle
-				file.write "#{indexRef[i]}, #{indexRef[i+1]}, #{indexRef[i+2]},  "
-			elsif c == 4 # quad
-				file.write "#{indexRef[i]}, #{indexRef[i+1]}, #{indexRef[i+2]}, #{indexRef[i]}, #{indexRef[i+2]}, #{indexRef[i+3]},  "
-			else
-				puts "#{c}-gons not supported. Only triangles and quads"
+		$vcount.each do |submeshId, numVerticesPerFace|
+			file.puts "static const GLushort #{$variableNames[:indices]}_#{submeshId}[] = {"
+			numVerticesPerFace.each do |c|
+				if c == 3 # triangle
+					file.write "#{indexRef[i]}, #{indexRef[i+1]}, #{indexRef[i+2]},  "
+				elsif c == 4 # quad
+					file.write "#{indexRef[i]}, #{indexRef[i+1]}, #{indexRef[i+2]}, #{indexRef[i]}, #{indexRef[i+2]}, #{indexRef[i+3]},  "
+				else
+					puts "#{c}-gons not supported. Only triangles and quads"
+				end
+				i = i + c
 			end
-			i = i + c
+			file.puts "\n};\n"
 		end
-		file.puts "\n};\n"
 
 		#skinned mesh?
 		if $jointCount > 0
@@ -655,7 +661,7 @@ def parseParameters()
 	end
 
 	# strings for code generation
-	basenameWithUnderscores = basename.gsub(/[\s-]/, '_') 
+	basenameWithUnderscores = basename.gsub(/[\s-]/, '_')
 	$h_guard = "MODEL_"+ basenameWithUnderscores.upcase+"_H_"
 	# add g_modelName to the variable names
 	$variableNames.each do |key, value|
@@ -668,7 +674,7 @@ end
 ########################################################
 if __FILE__ == $0 # when included as a lib, this code won't execute :)
 	parseParameters()
-	parseColladaFile($filename)	
+	parseColladaFile($filename)
 	uvEq = findUVEquivalences($texcoord, 256, 256)
 	polyEq = findPolygonEquivalences($polygons, uvEq[:equivalences])
 	if uvEq[:redundant] > 0
