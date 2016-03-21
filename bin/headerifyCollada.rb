@@ -464,6 +464,127 @@ class ColladaModel
 	########################################################
 	# Create header
 	########################################################
+	def dumpGeometryLangC(file, variableNames, equivalences)
+		datatype = "vertexDataTextured"
+		if @jointCount > 0
+			datatype = "vertexDataSkinned"
+		end
+		# vertices
+		index = 0
+		numVerts = 0
+		indexRef = Array.new
+		@polygons.each do |submeshId, polylist|
+			file.puts "static const #{datatype} #{variableNames[:vertices]}_#{submeshId}[] = {"
+			polylist.each do |p|
+				if equivalences[index] == index # unique references only
+					v = @vertices[p[0]]
+					n = @normals[p[1]]
+					t = [0.0, 0.0] # default texcoord for models without UVs
+					if !p[2].nil?
+						if !@texcoord[p[2]].nil?
+							t = @texcoord[p[2]]
+						end
+					end
+					if v.nil?
+						puts "Null vertex!"
+						next
+					end
+					file.write "\t{ " + ColladaModel.printVector(v) + ", " + ColladaModel.printVector(n) + ", " + ColladaModel.printVector(t)
+					if @jointCount > 0
+						w = [1.0, 0.0, 0.0] # weights of the joints
+						joints = [0, 0, 0, 0]
+						wj = @weightArray[p[0]]
+						wji = 0
+						wj.each do |jointWeightPair|
+							if wji < 3
+								joints[wji] = jointWeightPair[0]
+								w[wji] = jointWeightPair[1]
+							end
+							wji += 1
+						end
+						file.write ", " + ColladaModel.printVector(w) + ", " + ColladaModel.printVectorInt(joints)
+					end
+					file.write " }, \n"
+					indexRef[index] = numVerts
+					numVerts = numVerts + 1
+				else
+					eqIndex = equivalences[index]
+					if eqIndex.nil?
+						puts "createHeader: Nil index in equivalences!"
+						next
+					end
+					indexRef[index] = indexRef[eqIndex]
+				end
+				index = index + 1
+			end # polylist
+			file.puts "};\n"
+		end
+		# indices
+		i = 0
+		@vcount.each do |submeshId, numVerticesPerFace|
+			file.puts "static const GLushort #{variableNames[:indices]}_#{submeshId}[] = {"
+			numVerticesPerFace.each do |c|
+				if c == 3 # triangle
+					file.write "#{indexRef[i]}, #{indexRef[i+1]}, #{indexRef[i+2]},  "
+				elsif c == 4 # quad
+					file.write "#{indexRef[i]}, #{indexRef[i+1]}, #{indexRef[i+2]}, #{indexRef[i]}, #{indexRef[i+2]}, #{indexRef[i+3]},  "
+				else
+					puts "#{c}-gons not supported. Only triangles and quads"
+				end
+				i = i + c
+			end
+			file.puts "\n};\n"
+		end
+	end
+
+	def dumpSkeletonLangC(file, variableNames)
+		#skinned mesh?
+		if @jointCount > 0
+			file.write "\n// Skinned Mesh Data\n//--------------------------------------\n"
+			file.write "static const math::Matrix4 #{variableNames[:bindShapeM]} = " + ColladaModel.printMatrix(@bindShapeMatrix) + ";\n"
+			file.write "static const uint16_t #{variableNames[:boneCount]} = #{@skeletonNodeNames.size};\n";
+			file.write "static const uint16_t #{variableNames[:jointCount]} = #{@jointCount};\n"
+			file.write "// Bone names: #{@jointNames.join(', ')}\n\n"
+			file.write "static const math::Matrix4 #{variableNames[:invBindM]}[] = {\n" + ColladaModel.printMatrices(@invBindMatrices) + "\n};\n"
+			file.write "static struct core::TreeNode<math::Matrix4> #{variableNames[:jTT]}[] = {\n"
+			@skeleton.each{|k, v|
+				i = @skeletonNodeNames.index(k)
+				parentIndex = @skeletonNodeNames.index(v[:parentId])
+				if parentIndex.nil? # when a node has no parent, it's denoted by pointing to itself
+					parentIndex = i
+				end
+				file.write("\t/*#{i}: #{k}*/{#{parentIndex}, " + ColladaModel.printMatrix(v[:transform]) + "}, \n")
+			}
+			file.write "};\n"
+			file.write "static const uint16_t #{variableNames[:jointIndices]}[] = " + ColladaModel.printVectorInt(@jointIndexToSkeletonIndex) + ";\n\n"
+			file.write "// Transform for the whole skeleton\n"
+			file.write "static const math::Matrix4 #{variableNames[:armatureM]} = " + ColladaModel.printMatrix(@armatureTransform) + ";\n\n"
+			file.write "// Animation of each bone {keyframeCount, keyframeArray, Matrix4array}\n"
+			@animations.each do |k, v|
+				boneId = k
+				# convert secs to millisecs
+				file.write "static const float #{variableNames[:keyframes]}_#{boneId}[] = " + ColladaModel.printVector(v[:keyframes].map{|n| 1000 * n}) + ";\n"
+				file.write "static const math::Matrix4 #{variableNames[:matrices]}_#{boneId}[] = {\n" + ColladaModel.printMatrices(v[:matrices]) + "};\n"
+			end
+			file.write "static const gfx::MatrixAnimData #{variableNames[:animation]}[] = {\n"
+			@skeletonNodeNames.each do |boneId| # place them in the same order!
+				keyframeCount = 0
+				keyframes = "NULL"
+				animationMatrices = "NULL"
+				animationNode = @animations[boneId]
+				if !animationNode.nil?
+					keyframeCount = animationNode[:keyframes].size
+					keyframes = "#{variableNames[:keyframes]}_#{boneId}"
+					animationMatrices = "#{variableNames[:matrices]}_#{boneId}"
+				end
+				file.write "\t{ #{keyframeCount}, #{keyframes}, #{animationMatrices} },\n"
+			end
+			file.write "};\n\n"
+		else
+			file.write "// This model doesn't have a skeleton\n\n"
+		end # skinned mesh
+	end
+
 	def createHeader(options, equivalences)
 		begin
 			file = File.open(options[:outputFile], "w")
@@ -471,124 +592,11 @@ class ColladaModel
 			file.puts " */"
 			file.puts "\#ifndef #{options[:hGuard]}"
 			file.puts "\#define #{options[:hGuard]}\n\n"
-
-			datatype = "vertexDataTextured"
-			if @jointCount > 0
-				datatype = "vertexDataSkinned"
+			# pass --skeleton to skip dumping the geometry
+			if !options[:skeletonOnly]
+				dumpGeometryLangC(file, options[:variableNames], equivalences)
 			end
-
-			# vertices
-			index = 0
-			numVerts = 0
-			indexRef = Array.new
-			@polygons.each do |submeshId, polylist|
-				file.puts "static const #{datatype} #{options[:variableNames][:vertices]}_#{submeshId}[] = {"
-				polylist.each do |p|
-					if equivalences[index] == index # unique references only
-						v = @vertices[p[0]]
-						n = @normals[p[1]]
-						t = [0.0, 0.0] # default texcoord for models without UVs
-						if !p[2].nil?
-							if !@texcoord[p[2]].nil?
-								t = @texcoord[p[2]]
-							end
-						end
-						if v.nil?
-							puts "Null vertex!"
-							next
-						end
-						file.write "\t{ " + ColladaModel.printVector(v) + ", " + ColladaModel.printVector(n) + ", " + ColladaModel.printVector(t)
-						if @jointCount > 0
-							w = [1.0, 0.0, 0.0] # weights of the joints
-							joints = [0, 0, 0, 0]
-							wj = @weightArray[p[0]]
-							wji = 0
-							wj.each do |jointWeightPair|
-								if wji < 3
-									joints[wji] = jointWeightPair[0]
-									w[wji] = jointWeightPair[1]
-								end
-								wji += 1
-							end
-							file.write ", " + ColladaModel.printVector(w) + ", " + ColladaModel.printVectorInt(joints)
-						end
-						file.write " }, \n"
-						indexRef[index] = numVerts
-						numVerts = numVerts + 1
-					else
-						eqIndex = equivalences[index]
-						if eqIndex.nil?
-							puts "createHeader: Nil index in equivalences!"
-							next
-						end
-						indexRef[index] = indexRef[eqIndex]
-					end
-					index = index + 1
-				end # polylist
-				file.puts "};\n"
-			end
-			# indices
-			i = 0
-			@vcount.each do |submeshId, numVerticesPerFace|
-				file.puts "static const GLushort #{options[:variableNames][:indices]}_#{submeshId}[] = {"
-				numVerticesPerFace.each do |c|
-					if c == 3 # triangle
-						file.write "#{indexRef[i]}, #{indexRef[i+1]}, #{indexRef[i+2]},  "
-					elsif c == 4 # quad
-						file.write "#{indexRef[i]}, #{indexRef[i+1]}, #{indexRef[i+2]}, #{indexRef[i]}, #{indexRef[i+2]}, #{indexRef[i+3]},  "
-					else
-						puts "#{c}-gons not supported. Only triangles and quads"
-					end
-					i = i + c
-				end
-				file.puts "\n};\n"
-			end
-
-			#skinned mesh?
-			if @jointCount > 0
-				file.write "\n// Skinned Mesh Data\n//--------------------------------------\n"
-				file.write "static const math::Matrix4 #{options[:variableNames][:bindShapeM]} = " + ColladaModel.printMatrix(@bindShapeMatrix) + ";\n"
-				file.write "static const uint16_t #{options[:variableNames][:boneCount]} = #{@skeletonNodeNames.size};\n";
-				file.write "static const uint16_t #{options[:variableNames][:jointCount]} = #{@jointCount};\n"
-				file.write "// Bone names: #{@jointNames.join(', ')}\n\n"
-				file.write "static const math::Matrix4 #{options[:variableNames][:invBindM]}[] = {\n" + ColladaModel.printMatrices(@invBindMatrices) + "\n};\n"
-				file.write "static struct core::TreeNode<math::Matrix4> #{options[:variableNames][:jTT]}[] = {\n"
-				@skeleton.each{|k, v|
-					i = @skeletonNodeNames.index(k)
-					parentIndex = @skeletonNodeNames.index(v[:parentId])
-					if parentIndex.nil? # when a node has no parent, it's denoted by pointing to itself
-						parentIndex = i
-					end
-					file.write("\t/*#{i}: #{k}*/{#{parentIndex}, " + ColladaModel.printMatrix(v[:transform]) + "}, \n")
-				}
-				file.write "};\n"
-				file.write "static const uint16_t #{options[:variableNames][:jointIndices]}[] = " + ColladaModel.printVectorInt(@jointIndexToSkeletonIndex) + ";\n\n"
-				file.write "// Transform for the whole skeleton\n"
-				file.write "static const math::Matrix4 #{options[:variableNames][:armatureM]} = " + ColladaModel.printMatrix(@armatureTransform) + ";\n\n"
-				file.write "// Animation of each bone {keyframeCount, keyframeArray, Matrix4array}\n"
-				@animations.each do |k, v|
-					boneId = k
-					# convert secs to millisecs
-					file.write "static const float #{options[:variableNames][:keyframes]}_#{boneId}[] = " + ColladaModel.printVector(v[:keyframes].map{|n| 1000 * n}) + ";\n"
-					file.write "static const math::Matrix4 #{options[:variableNames][:matrices]}_#{boneId}[] = {\n" + ColladaModel.printMatrices(v[:matrices]) + "};\n"
-				end
-				file.write "static const gfx::MatrixAnimData #{options[:variableNames][:animation]}[] = {\n"
-				@skeletonNodeNames.each do |boneId| # place them in the same order!
-					keyframeCount = 0
-					keyframes = "NULL"
-					animationMatrices = "NULL"
-					animationNode = @animations[boneId]
-					if !animationNode.nil?
-						keyframeCount = animationNode[:keyframes].size
-						keyframes = "#{options[:variableNames][:keyframes]}_#{boneId}"
-						animationMatrices = "#{options[:variableNames][:matrices]}_#{boneId}"
-					end
-					file.write "\t{ #{keyframeCount}, #{keyframes}, #{animationMatrices} },\n"
-				end
-				file.write "};\n\n"
-
-			end # skinned mesh
-
+			dumpSkeletonLangC(file, options[:variableNames])
 			# end header
 			file.puts "\#endif // #{options[:hGuard]}"
 		rescue IOError => e
@@ -597,7 +605,6 @@ class ColladaModel
 			file.close unless file == nil
 		end
 	end
-
 
 	########################################################
 	# Debug UVs
@@ -632,6 +639,7 @@ class ColladaModel
 		options[:daeFile] = ""
 		options[:outputFile] = ""
 		options[:debugUVFile] = ""
+		options[:skeletonOnly] = false
 		options[:hGuard] = ""
 		options[:variableNames] = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindShapeMatrix", jointCount: "JointCount", boneCount: "BoneCount", invBindM: "InverseBindMatrices", jTT: "JointTransformTree", jointIndices: "JointToSkeletonIndices", armatureM: "ArmatureTransform", animation: "AnimationData", keyframes: "Keyframes", matrices: "Matrices" }
 
@@ -645,6 +653,9 @@ class ColladaModel
 			end
 			opts.on("-f", "--force", "Overwrites any existing header file") do |v|
 				force = true
+			end
+			opts.on("-s", "--skeleton", "Export only joints and skeleton animations") do |v|
+				options[:skeletonOnly] = true
 			end
 			opts.on('-h', '--help', 'Displays Help') do
 				puts opts
