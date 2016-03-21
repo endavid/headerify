@@ -206,7 +206,7 @@ def parseColladaFile(colladaFile)
 	}
 	# animations of the bones in the skeleton
 	doc.root.elements.each("library_animations/animation") {|anim|
-		boneId = /Armature_(.+)_pose_matrix/.match(anim.attributes['id'])[1]
+		boneId = /.+_(.+)_pose_matrix/.match(anim.attributes['id'])[1]
 		boneIndex = $skeletonNodeNames.index(boneId)
 		if !boneId.nil?
 			animationNode = {keyframes: [], matrices: []}
@@ -339,26 +339,28 @@ def findUVEquivalences(uvArray, textureWidth, textureHeight)
 end
 
 # same polygons?
-def findPolygonEquivalences(polys, uvEquivalences)
+def findPolygonEquivalences(submeshes, uvEquivalences)
 	hash = Hash.new
 	equivalences = Array.new
 	index = 0
 	redundantCount = 0
-	polys.each do |p|
-		uvIndex = p[2]
-		if uvIndex.nil? # missing UV coords
-			uvIndex = 0
+	submeshes.each do |submeshId, polys|
+		polys.each do |p|
+			uvIndex = p[2]
+			if uvIndex.nil? # missing UV coords
+				uvIndex = 0
+			end
+			uvIndex = uvEquivalences[uvIndex]
+			key = "#{p[0]},#{p[1]},uvIndex"
+			if hash[key].nil?
+				hash[key] = index
+				equivalences[index] = index
+			else
+				equivalences[index] = hash[key]
+				redundantCount = redundantCount + 1
+			end
+			index = index + 1
 		end
-		uvIndex = uvEquivalences[uvIndex]
-		key = "#{p[0]},#{p[1]},uvIndex"
-		if hash[key].nil?
-			hash[key] = index
-			equivalences[index] = index
-		else
-			equivalences[index] = hash[key]
-			redundantCount = redundantCount + 1
-		end
-		index = index + 1
 	end
 	return {:equivalences => equivalences, :redundant => redundantCount}
 end
@@ -502,7 +504,13 @@ def createHeader(equivalences)
 					indexRef[index] = numVerts
 					numVerts = numVerts + 1
 				else
-					indexRef[index] = indexRef[equivalences[index]]
+					eqIndex = equivalences[index]
+					if eqIndex.nil?
+						pp index
+						pp equivalences
+						exit 1
+					end
+					indexRef[index] = indexRef[eqIndex]
 				end
 				index = index + 1
 			end # polylist
@@ -612,7 +620,7 @@ def parseParameters()
 	force = false # overwrite file?
 
 	parser = OptionParser.new do |opts|
-		opts.banner = "Usage: #{__FILE__} [options]"
+		opts.banner = "Usage: #{__FILE__} DAE-file [options]"
 		opts.separator ""
 		opts.separator "Specific options:"
 		opts.on("-d", "--debug", "Generate a PNG file with UVs") do |v|
