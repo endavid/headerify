@@ -8,14 +8,15 @@
 # @author David Gavilan
 #
 ########################################################
-require "optparse" # to parse arguments
-require "rexml/document"
-require "json"
-require "pp"
+require 'optparse' # to parse arguments
+require 'rexml/document'
+require 'json'
+require 'pp'
+require 'matrix'
 include REXML # to use "Element"
 $isChunky = true;
 begin
-	require "chunky_png"
+	require 'chunky_png'
 rescue LoadError
 	$isChunky = false;
 end
@@ -26,6 +27,34 @@ class Numeric
 	end
 	def toRadians
 		self * Math::PI / 180
+	end
+end
+
+class Matrix
+	def self.extractRotation(m)
+		Matrix[ [m[0], m[1], m[2]], [m[4], m[5], m[6]], [m[8], m[9], m[10]]]
+	end
+	# there's usually 2 solutions
+	def computeEulerAngles()
+		if self[2,0].abs != 1
+			phi1 = -Math.asin(self[2,0])
+			phi2 = Math::PI - phi1
+			psi1 = Math.atan2(self[2,1]/Math.cos(phi1), self[2,2]/Math.cos(phi1))
+			psi2 = Math.atan2(self[2,1]/Math.cos(phi2), self[2,2]/Math.cos(phi2))
+			theta1 = Math.atan2(self[1,0]/Math.cos(phi2), self[0,0]/Math.cos(phi2))
+			theta2 = Math.atan2(self[1,0]/Math.cos(phi2), self[0,0]/Math.cos(phi2))
+			return [ [theta1.toDegrees, psi1.toDegrees, phi1.toDegrees], [theta2.toDegrees, psi2.toDegrees, phi2.toDegrees]]
+		end
+		# Gimbal lock! there are an infinite number of solutions; set phi to 0
+		phi = 0
+		if self[2,0] == -1
+			theta = 0.5 * Math::PI
+			psi = phi + Math.atan2(self[0,1], self[0,2])
+		else
+			theta = -0.5 * Math::PI
+			psi = -phi + Math.atan2(-self[0,1], -self[0,2])
+		end
+		return [[theta.toDegrees, psi.toDegrees, phi.toDegrees]]
 	end
 end
 
@@ -453,28 +482,10 @@ class ColladaModel
 
   # there's usually 2 solutions
 	def self.computeEulerAnglesAndTranslationFromMatrix(m)
+		rot = Matrix.extractRotation(m)
 		transform = {}
 		transform[:translation] = [m[3], m[7], m[11]]
-		if m[8].abs != 1
-			phi1 = -Math.asin(m[8])
-			phi2 = Math::PI - phi1
-			psi1 = Math.atan2(m[9]/Math.cos(phi1), m[10]/Math.cos(phi1))
-			psi2 = Math.atan2(m[9]/Math.cos(phi2), m[10]/Math.cos(phi2))
-			theta1 = Math.atan2(m[4]/Math.cos(phi2), m[0]/Math.cos(phi2))
-			theta2 = Math.atan2(m[4]/Math.cos(phi2), m[0]/Math.cos(phi2))
-			transform[:eulerSolutions] = [ [theta1.toDegrees, psi1.toDegrees, phi1.toDegrees], [theta2.toDegrees, psi2.toDegrees, phi2.toDegrees]]
-		else
-			# Gimbal lock! there are an infinite number of solutions; set phi to 0
-			phi = 0
-			if m[8] == -1
-				theta = 0.5 * Math::PI
-				psi = phi + Math.atan2(m[1], m[2])
-			else
-				theta = -0.5 * Math::PI
-				psi = -phi + Math.atan2(-m[1], -m[2])
-			end
-			transform[:eulerSolutions] = [[theta.toDegrees, psi.toDegrees, phi.toDegrees]]
-		end
+		transform[:eulerSolutions] = rot.computeEulerAngles()
 		return transform
 	end
 
@@ -622,7 +633,7 @@ class ColladaModel
 		end # skinned mesh
 	end
 
-	def skeletalDataToHash(options)
+	def skeletalDataToHash(euler)
 		sk = {}
 		if @jointCount > 0
 			sk[:bindShapeMatrix] = @bindShapeMatrix
@@ -637,7 +648,7 @@ class ColladaModel
 			@animations.each do |boneId, v|
 				sk[:animations][boneId] = {}
 				sk[:animations][boneId][:keyframes] = v[:keyframes]
-				sk[:animations][boneId][:matrices] = options[:euler] ? v[:matrices].map{|m| ColladaModel.computeEulerAnglesAndTranslationFromMatrix(m)} : v[:matrices]
+				sk[:animations][boneId][:matrices] = euler ? v[:matrices].map{|m| ColladaModel.computeEulerAnglesAndTranslationFromMatrix(m)} : v[:matrices]
 			end
 		end
 		return sk
@@ -659,26 +670,31 @@ class ColladaModel
 
 	def createJsonFile(file, options, equivalences)
 		model = {
-			"skeletalData" => skeletalDataToHash(options)
+			"skeletalData" => skeletalDataToHash(options[:euler])
 		}
 		file.write(JSON.pretty_generate(model))
 	end
 
 	def createPoses(file, options)
-		sk = skeletalDataToHash(options)
+		sk = skeletalDataToHash(false)
 		frameCount = sk[:animations].first[1][:keyframes].size
-		eulerSolutionCount = 2
+		eulerSolutionCount = options[:euler] ? 2 : 1
 		for i in 1..frameCount-1
 			for j in 0..eulerSolutionCount-1
-				file.puts "\# Frame #{i+1}/#{frameCount}; Euler solution #{j+1}/#{eulerSolutionCount}"
+				file.puts "\# Frame #{i+1}/#{frameCount}"
+				if options[:euler]
+					file.puts "\# Euler solution #{j+1}/#{eulerSolutionCount}"
+				end
 				sk[:animations].each do |boneId, v|
-					m = v[:matrices][i][:eulerSolutions]
-					m0 = v[:matrices][0][:eulerSolutions]
-				  angles = m[j].nil? ? m[0] : m[j]
-					angles0 = m0[j].nil? ? m0[0] : m0[j]
-					# compute the deltas respect the starting pose
-					deltas = angles.map.with_index{|a,i| a-angles0[i]}
-					file.puts "#{boneId} #{deltas[0]} #{deltas[1]} #{deltas[2]}"
+					m0 = Matrix.extractRotation(v[:matrices][0]).inverse
+					m = m0 * Matrix.extractRotation(v[:matrices][i])
+					if options[:euler]
+						eulers = m.computeEulerAngles()
+				  	angles = eulers[j].nil? ? eulers[0] : eulers[j]
+						file.puts "#{boneId} #{angles[0]} #{angles[1]} #{angles[2]}"
+					else
+						file.puts "#{boneId} #{m}"
+					end
 				end
 			end
 		end
@@ -745,7 +761,6 @@ class ColladaModel
 				options[:euler] = true
 			end
 			opts.on("-p", "--poses", "Export skeleton poses as Euler angles") do |v|
-				options[:euler] = true
 				options[:poses] = true
 			end
 			opts.on('-h', '--help', 'Displays Help') do
