@@ -10,6 +10,7 @@
 ########################################################
 require "optparse" # to parse arguments
 require "rexml/document"
+require "json"
 require "pp"
 include REXML # to use "Element"
 $isChunky = true;
@@ -17,6 +18,15 @@ begin
 	require "chunky_png"
 rescue LoadError
 	$isChunky = false;
+end
+
+class Numeric
+	def toDegrees
+		self * 180 / Math::PI
+	end
+	def toRadians
+		self * Math::PI / 180
+	end
 end
 
 # Holds all the data from a Collada file once parsed, and lets you export
@@ -441,6 +451,33 @@ class ColladaModel
 		return matrixArray.map{|m| invertAxisMatrix(m)}
 	end
 
+  # there's usually 2 solutions
+	def self.computeEulerAnglesAndTranslationFromMatrix(m)
+		transform = {}
+		transform[:translation] = [m[3], m[7], m[11]]
+		if m[8].abs != 1
+			phi1 = -Math.asin(m[8])
+			phi2 = Math::PI - phi1
+			psi1 = Math.atan2(m[9]/Math.cos(phi1), m[10]/Math.cos(phi1))
+			psi2 = Math.atan2(m[9]/Math.cos(phi2), m[10]/Math.cos(phi2))
+			theta1 = Math.atan2(m[4]/Math.cos(phi2), m[0]/Math.cos(phi2))
+			theta2 = Math.atan2(m[4]/Math.cos(phi2), m[0]/Math.cos(phi2))
+			transform[:eulerSolutions] = [ [theta1.toDegrees, psi1.toDegrees, phi1.toDegrees], [theta2.toDegrees, psi2.toDegrees, phi2.toDegrees]]
+		else
+			# Gimbal lock! there are an infinite number of solutions; set phi to 0
+			phi = 0
+			if m[8] == -1
+				theta = 0.5 * Math::PI
+				psi = phi + Math.atan2(m[1], m[2])
+			else
+				theta = -0.5 * Math::PI
+				psi = -phi + Math.atan2(-m[1], -m[2])
+			end
+			transform[:eulerSolutions] = [[theta.toDegrees, psi.toDegrees, phi.toDegrees]]
+		end
+		return transform
+	end
+
 	########################################################
 	# Printing functions
 	########################################################
@@ -585,6 +622,27 @@ class ColladaModel
 		end # skinned mesh
 	end
 
+	def skeletalDataToHash(options)
+		sk = {}
+		if @jointCount > 0
+			sk[:bindShapeMatrix] = @bindShapeMatrix
+			sk[:boneCount] = @skeletonNodeNames.size
+			sk[:jointCount] = @jointCount
+			sk[:jointNames] = @jointNames
+			sk[:inverseBindMatrices] = @invBindMatrices
+			sk[:skeleton] = @skeleton
+			sk[:jointIndexToSkeletonIndex] = @jointIndexToSkeletonIndex
+			sk[:armatureTransform] = @armatureTransform
+			sk[:animations] = {}
+			@animations.each do |boneId, v|
+				sk[:animations][boneId] = {}
+				sk[:animations][boneId][:keyframes] = v[:keyframes]
+				sk[:animations][boneId][:matrices] = options[:euler] ? v[:matrices].map{|m| ColladaModel.computeEulerAnglesAndTranslationFromMatrix(m)} : v[:matrices]
+			end
+		end
+		return sk
+	end
+
 	def createHeader(options, equivalences)
 		begin
 			file = File.open(options[:outputFile], "w")
@@ -601,6 +659,21 @@ class ColladaModel
 			file.puts "\#endif // #{options[:hGuard]}"
 		rescue IOError => e
 			#some error occur, dir not writable etc.
+			pp e
+		ensure
+			file.close unless file == nil
+		end
+	end
+
+	def createJsonFile(options, equivalences)
+		begin
+			file = File.open(options[:outputFile], "w")
+			model = {
+				"skeletalData" => skeletalDataToHash(options)
+			}
+			file.write(JSON.pretty_generate(model))
+		rescue IOError => e
+			pp e
 		ensure
 			file.close unless file == nil
 		end
@@ -641,11 +714,13 @@ class ColladaModel
 		options[:debugUVFile] = ""
 		options[:skeletonOnly] = false
 		options[:hGuard] = ""
+		options[:json] = false
+		options[:euler] = false
 		options[:variableNames] = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindShapeMatrix", jointCount: "JointCount", boneCount: "BoneCount", invBindM: "InverseBindMatrices", jTT: "JointTransformTree", jointIndices: "JointToSkeletonIndices", armatureM: "ArmatureTransform", animation: "AnimationData", keyframes: "Keyframes", matrices: "Matrices" }
 
 		force = false # overwrite file?
 		parser = OptionParser.new do |opts|
-			opts.banner = "Usage: #{__FILE__} DAE-file [options]"
+			opts.banner = "Usage: #{__FILE__} outputFile [options]"
 			opts.separator ""
 			opts.separator "Specific options:"
 			opts.on("-d", "--debug", "Generate a PNG file with UVs") do |v|
@@ -656,6 +731,12 @@ class ColladaModel
 			end
 			opts.on("-s", "--skeleton", "Export only joints and skeleton animations") do |v|
 				options[:skeletonOnly] = true
+			end
+			opts.on("-j", "--json", "Export as a JSON file") do |v|
+				options[:json] = true
+			end
+			opts.on("-e", "--euler", "Convert rotation matrices to Euler angles") do |v|
+				options[:euler] = true
 			end
 			opts.on('-h', '--help', 'Displays Help') do
 				puts opts
@@ -668,24 +749,22 @@ class ColladaModel
 		end
 		parser.parse!(args)
 
-		# ARGV shouldn't contain any optional parameter after parse!
+		# args shouldn't contain any optional parameter after parse!
 		options[:daeFile] = args[0]
-
 		if !File.exists?(options[:daeFile])
 			puts "File \"" + options[:daeFile] + "\" doesn't exist."
 			exit 0
 		end
-
 		basename = File.basename(options[:daeFile], File.extname(options[:daeFile]) )
-
+		ext = options[:json] ? ".json" : ".h"
 		if force
-			options[:outputFile] = basename + ".h"
+			options[:outputFile] = basename + ext
 			options[:debugUVFile] = basename + ".png"
 		else
 			# find unique output filename (avoid overwriting existing files)
 			interfix = 0
 			begin
-				suffix = interfix > 0 ? "_" + interfix.to_s + ".h" : ".h"
+				suffix = interfix > 0 ? "_" + interfix.to_s + ext : ext
 				options[:outputFile] = basename + suffix
 				interfix += 1
 			end while File.exists?(options[:outputFile])
@@ -709,7 +788,11 @@ class ColladaModel
 		colladaModel = ColladaModel.new
 		colladaModel.parseColladaFile(options[:daeFile])
 		equivalences = colladaModel.computeEquivalences()
-		colladaModel.createHeader(options, equivalences)
+		if options[:json]
+			colladaModel.createJsonFile(options, equivalences)
+		else
+			colladaModel.createHeader(options, equivalences)
+		end
 		puts "File saved to #{options[:outputFile]}"
 		if options[:debug]
 			if $isChunky
