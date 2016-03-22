@@ -668,13 +668,17 @@ class ColladaModel
 		sk = skeletalDataToHash(options)
 		frameCount = sk[:animations].first[1][:keyframes].size
 		eulerSolutionCount = 2
-		for i in 0..frameCount-1
+		for i in 1..frameCount-1
 			for j in 0..eulerSolutionCount-1
 				file.puts "\# Frame #{i+1}/#{frameCount}; Euler solution #{j+1}/#{eulerSolutionCount}"
 				sk[:animations].each do |boneId, v|
 					m = v[:matrices][i][:eulerSolutions]
+					m0 = v[:matrices][0][:eulerSolutions]
 				  angles = m[j].nil? ? m[0] : m[j]
-					file.puts "#{boneId} #{angles[0]} #{angles[1]} #{angles[2]}"
+					angles0 = m0[j].nil? ? m0[0] : m0[j]
+					# compute the deltas respect the starting pose
+					deltas = angles.map.with_index{|a,i| a-angles0[i]}
+					file.puts "#{boneId} #{deltas[0]} #{deltas[1]} #{deltas[2]}"
 				end
 			end
 		end
