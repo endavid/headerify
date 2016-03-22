@@ -643,39 +643,40 @@ class ColladaModel
 		return sk
 	end
 
-	def createHeader(options, equivalences)
-		begin
-			file = File.open(options[:outputFile], "w")
-			file.puts "/**\n * @file #{options[:outputFile]}"
-			file.puts " */"
-			file.puts "\#ifndef #{options[:hGuard]}"
-			file.puts "\#define #{options[:hGuard]}\n\n"
-			# pass --skeleton to skip dumping the geometry
-			if !options[:skeletonOnly]
-				dumpGeometryLangC(file, options[:variableNames], equivalences)
-			end
-			dumpSkeletonLangC(file, options[:variableNames])
-			# end header
-			file.puts "\#endif // #{options[:hGuard]}"
-		rescue IOError => e
-			#some error occur, dir not writable etc.
-			pp e
-		ensure
-			file.close unless file == nil
+	def createHeader(file, options, equivalences)
+		file.puts "/**\n * @file #{options[:outputFile]}"
+		file.puts " */"
+		file.puts "\#ifndef #{options[:hGuard]}"
+		file.puts "\#define #{options[:hGuard]}\n\n"
+		# pass --skeleton to skip dumping the geometry
+		if !options[:skeletonOnly]
+			dumpGeometryLangC(file, options[:variableNames], equivalences)
 		end
+		dumpSkeletonLangC(file, options[:variableNames])
+		# end header
+		file.puts "\#endif // #{options[:hGuard]}"
 	end
 
-	def createJsonFile(options, equivalences)
-		begin
-			file = File.open(options[:outputFile], "w")
-			model = {
-				"skeletalData" => skeletalDataToHash(options)
-			}
-			file.write(JSON.pretty_generate(model))
-		rescue IOError => e
-			pp e
-		ensure
-			file.close unless file == nil
+	def createJsonFile(file, options, equivalences)
+		model = {
+			"skeletalData" => skeletalDataToHash(options)
+		}
+		file.write(JSON.pretty_generate(model))
+	end
+
+	def createPoses(file, options)
+		sk = skeletalDataToHash(options)
+		frameCount = sk[:animations].first[1][:keyframes].size
+		eulerSolutionCount = 2
+		for i in 0..frameCount-1
+			for j in 0..eulerSolutionCount-1
+				file.puts "\# Frame #{i+1}/#{frameCount}; Euler solution #{j+1}/#{eulerSolutionCount}"
+				sk[:animations].each do |boneId, v|
+					m = v[:matrices][i][:eulerSolutions]
+				  angles = m[j].nil? ? m[0] : m[j]
+					file.puts "#{boneId} #{angles[0]} #{angles[1]} #{angles[2]}"
+				end
+			end
 		end
 	end
 
@@ -716,6 +717,7 @@ class ColladaModel
 		options[:hGuard] = ""
 		options[:json] = false
 		options[:euler] = false
+		options[:poses] = false
 		options[:variableNames] = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindShapeMatrix", jointCount: "JointCount", boneCount: "BoneCount", invBindM: "InverseBindMatrices", jTT: "JointTransformTree", jointIndices: "JointToSkeletonIndices", armatureM: "ArmatureTransform", animation: "AnimationData", keyframes: "Keyframes", matrices: "Matrices" }
 
 		force = false # overwrite file?
@@ -738,6 +740,10 @@ class ColladaModel
 			opts.on("-e", "--euler", "Convert rotation matrices to Euler angles") do |v|
 				options[:euler] = true
 			end
+			opts.on("-p", "--poses", "Export skeleton poses as Euler angles") do |v|
+				options[:euler] = true
+				options[:poses] = true
+			end
 			opts.on('-h', '--help', 'Displays Help') do
 				puts opts
 				exit
@@ -756,7 +762,7 @@ class ColladaModel
 			exit 0
 		end
 		basename = File.basename(options[:daeFile], File.extname(options[:daeFile]) )
-		ext = options[:json] ? ".json" : ".h"
+		ext = options[:json] ? ".json" : options[:poses] ? ".txt" : ".h"
 		if force
 			options[:outputFile] = basename + ext
 			options[:debugUVFile] = basename + ".png"
@@ -784,24 +790,33 @@ class ColladaModel
 	# Main
 	def self.execute(args)
 		options = self.parse(args)
-		# pp options
-		colladaModel = ColladaModel.new
-		colladaModel.parseColladaFile(options[:daeFile])
-		equivalences = colladaModel.computeEquivalences()
-		if options[:json]
-			colladaModel.createJsonFile(options, equivalences)
-		else
-			colladaModel.createHeader(options, equivalences)
-		end
-		puts "File saved to #{options[:outputFile]}"
-		if options[:debug]
-			if $isChunky
-				colladaModel.createDebugUVImage(128, 128, options[:debugUVFile])
-				puts "Debug UV image saved to #{options[:debugUVFile]}"
+		begin
+			file = File.open(options[:outputFile], "w")
+			# pp options
+			colladaModel = ColladaModel.new
+			colladaModel.parseColladaFile(options[:daeFile])
+			equivalences = colladaModel.computeEquivalences()
+			if options[:json]
+				colladaModel.createJsonFile(file, options, equivalences)
+			elsif options[:poses]
+				colladaModel.createPoses(file, options)
 			else
-				puts "ERROR: Failed to create debug UV image."
-				puts "Please gem install chunky_png"
+				colladaModel.createHeader(files, options, equivalences)
 			end
+			puts "File saved to #{options[:outputFile]}"
+			if options[:debug]
+				if $isChunky
+					colladaModel.createDebugUVImage(128, 128, options[:debugUVFile])
+					puts "Debug UV image saved to #{options[:debugUVFile]}"
+				else
+					puts "ERROR: Failed to create debug UV image."
+					puts "Please gem install chunky_png"
+				end
+			end
+		rescue IOError => e
+			pp e
+		ensure
+			file.close unless file == nil
 		end
 	end
 
