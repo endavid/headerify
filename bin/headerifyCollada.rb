@@ -515,8 +515,11 @@ class ColladaModel
 			while a >= 360
 				a = a - 360
 			end
+			while a <= -360
+				a = a + 360
+			end
 			s = a.to_s
-			if s == "0.0"
+			if s == "0.0" || s == "-0.0"
 				s = "0"
 			end
 			s
@@ -709,6 +712,9 @@ class ColladaModel
 						if !options[:eulerOffsets][j].nil?
 							angles = angles.map.with_index{|a,index| a+options[:eulerOffsets][j][index]}
 						end
+						if options[:axisInversion]
+							angles = [angles[1], -angles[0], j == 0 ? angles[2] : -angles[2]]
+						end
 						aStr = ColladaModel.printDegrees(angles).join(" ")
 						file.puts "#{boneId} #{aStr}"
 					else
@@ -758,6 +764,7 @@ class ColladaModel
 		options[:euler] = false
 		options[:poses] = false
 		options[:eulerOffsets] = []
+		options[:axisInversion] = false
 		options[:variableNames] = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindShapeMatrix", jointCount: "JointCount", boneCount: "BoneCount", invBindM: "InverseBindMatrices", jTT: "JointTransformTree", jointIndices: "JointToSkeletonIndices", armatureM: "ArmatureTransform", animation: "AnimationData", keyframes: "Keyframes", matrices: "Matrices" }
 
 		force = false # overwrite file?
@@ -783,8 +790,11 @@ class ColladaModel
 			opts.on("-p", "--poses", "Export skeleton poses as Euler angles") do |v|
 				options[:poses] = true
 			end
-			opts.on("-x", "--eulerHack", "Adds some magic angle offsets") do |v|
+			opts.on("-l", "--eulerHack", "Adds some magic angle offsets") do |v|
 				options[:eulerOffsets] = [ [180,0,0], [180, 180, -180] ]
+			end
+			opts.on("-x", "--axisInversionHack", "Magically fix axis") do |v|
+				options[:axisInversion] = true
 			end
 			opts.on('-h', '--help', 'Displays Help') do
 				puts opts
