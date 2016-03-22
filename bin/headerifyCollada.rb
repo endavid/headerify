@@ -508,6 +508,21 @@ class ColladaModel
 	def self.printMatrices(mm)
 		return mm.map{|m| "\t"+self.printMatrix(m)}.join(",\n")
 	end
+	# prints degrees angles
+	def self.printDegrees(angles)
+		pretty = angles.map do |a|
+			a = a.round(2)
+			while a >= 360
+				a = a - 360
+			end
+			s = a.to_s
+			if s == "0.0"
+				s = "0"
+			end
+			s
+		end
+		return pretty
+	end
 
 	########################################################
 	# Create header
@@ -691,7 +706,11 @@ class ColladaModel
 					if options[:euler]
 						eulers = m.computeEulerAngles()
 				  	angles = eulers[j].nil? ? eulers[0] : eulers[j]
-						file.puts "#{boneId} #{angles[0]} #{angles[1]} #{angles[2]}"
+						if !options[:eulerOffsets][j].nil?
+							angles = angles.map.with_index{|a,index| a+options[:eulerOffsets][j][index]}
+						end
+						aStr = ColladaModel.printDegrees(angles).join(" ")
+						file.puts "#{boneId} #{aStr}"
 					else
 						file.puts "#{boneId} #{m}"
 					end
@@ -738,6 +757,7 @@ class ColladaModel
 		options[:json] = false
 		options[:euler] = false
 		options[:poses] = false
+		options[:eulerOffsets] = []
 		options[:variableNames] = { vertices: "Vertices", indices: "Indices", bindShapeM: "BindShapeMatrix", jointCount: "JointCount", boneCount: "BoneCount", invBindM: "InverseBindMatrices", jTT: "JointTransformTree", jointIndices: "JointToSkeletonIndices", armatureM: "ArmatureTransform", animation: "AnimationData", keyframes: "Keyframes", matrices: "Matrices" }
 
 		force = false # overwrite file?
@@ -762,6 +782,9 @@ class ColladaModel
 			end
 			opts.on("-p", "--poses", "Export skeleton poses as Euler angles") do |v|
 				options[:poses] = true
+			end
+			opts.on("-x", "--eulerHack", "Adds some magic angle offsets") do |v|
+				options[:eulerOffsets] = [ [180,0,0], [180, 180, -180] ]
 			end
 			opts.on('-h', '--help', 'Displays Help') do
 				puts opts
